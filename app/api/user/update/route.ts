@@ -1,45 +1,53 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import { NextRequest, NextResponse } from "next/server"
-import { getServerSession } from "next-auth"
-import { authOptions } from "@/app/api/auth/[...nextauth]/route"
-import prisma from "@/lib/prisma"
-import formidable from "formidable"
-import fs from "fs"
-
-export const config = {
-  api: {
-    bodyParser: false,
-  },
-}
+import { NextRequest, NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/app/api/auth/[...nextauth]/route";
+import prisma from "@/lib/prisma";
+import { writeFile } from "fs/promises";
+import path from "path";
 
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions)
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  try {
+    const session = await getServerSession(authOptions);
+    if (!session?.user?.email) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-  const form = formidable({ multiples: false, uploadDir: "./public/uploads", keepExtensions: true })
+    const formData = await req.formData();
+    const name = formData.get("name") as string;
+    const username = formData.get("username") as string;
+    const image = formData.get("image") as File | null;
 
-  const data: any = await new Promise((resolve, reject) => {
-    form.parse(req as any, (err: any, fields: any, files: any) => {
-      if (err) reject(err)
-      resolve({ fields, files })
-    })
-  })
+    let imagePath: string | undefined = undefined;
 
-  const name = data.fields.name as string
-  const image = data.files.image?.[0]?.newFilename
+    if (image && image.size > 0) {
+      const bytes = await image.arrayBuffer();
+      const buffer = Buffer.from(bytes);
+      const cleanName = image.name.replace(/\s+/g, "-").toLowerCase();
+      const filename = `${Date.now()}-${cleanName}`;
+      const filepath = path.join(process.cwd(), "public/uploads", filename);
+      await writeFile(filepath, buffer);
+      imagePath = `/uploads/${filename}`;
+    }
 
-  if (session.user?.email != null) {
+    if (username) {
+      const existingUser = await prisma.user.findUnique({ where: { username } });
+      if (existingUser && existingUser.email !== session.user.email) {
+        return NextResponse.json({ error: "Username already taken" }, { status: 400 });
+      }
+    }
+
     await prisma.user.update({
       where: { email: session.user.email },
       data: {
         name,
-        image: image ? `/uploads/${image}` : undefined,
+        username,
+        image: imagePath,
       },
     });
-  } else {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-}
 
-  return NextResponse.json({ success: true })
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error("Error updating user:", error);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }
